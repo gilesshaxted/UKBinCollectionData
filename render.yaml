@@ -1,12 +1,8 @@
 services:
   - type: web
     name: bin-collection-api
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python sbd_server.py
+    env: docker
+    plan: free
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.9.0
-    buildpacks:
-      - key: render-buildpack-chrome
-        url: https://github.com/render-inc/render-buildpack-chrome
+      - key: PORT
+        value: 10000
