@@ -95,14 +95,29 @@ def get_bins(req: BinRequest):
         # Convert "Wiltshire Council" back to "WiltshireCouncil"
         module_name = req.module.replace(" ", "")
         
-        logger.info(f"Subprocess: Running {module_name} with {req.address_data}")
+        input_data = req.address_data.strip()
+        logger.info(f"Subprocess: Running {module_name} with input '{input_data}'")
         
         # Prepare Environment (ensure PYTHONPATH includes current dir)
         env = os.environ.copy()
         env["PYTHONPATH"] = os.getcwd() + os.pathsep + env.get("PYTHONPATH", "")
 
-        # COMMAND: python collect_data.py <module> <address>
-        cmd = [sys.executable, collect_data_path, module_name, req.address_data]
+        # COMMAND CONSTRUCTION
+        # python collect_data.py <module> [ARGS]
+        cmd = [sys.executable, collect_data_path, module_name]
+
+        # Intelligent Flag Detection
+        if input_data.lower().startswith("http"):
+            # It's a URL, pass as positional argument
+            cmd.append(input_data)
+        elif input_data.isdigit():
+            # It's a UPRN (all digits)
+            cmd.append("-u")
+            cmd.append(input_data)
+        else:
+            # Assume Postcode (default fallback)
+            cmd.append("-p")
+            cmd.append(input_data)
         
         # Run the command and capture output
         result = subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -114,11 +129,14 @@ def get_bins(req: BinRequest):
             logger.error(f"STDERR: {result.stderr}")
 
         if result.returncode != 0:
-            # Check for specific "MissingSchema" error which means user sent postcode instead of URL
-            if "MissingSchema" in result.stderr or "Invalid URL" in result.stderr:
-                raise HTTPException(status_code=400, detail="This council requires a Web Link (URL) to the calendar, not a postcode. Please visit your council website, find your calendar page, and paste that URL here.")
+            # Check for common errors to give better feedback
+            err_msg = result.stderr
+            if "MissingSchema" in err_msg:
+                 err_msg = "This council might require a URL but a Postcode was provided. Check if the council supports postcode search."
+            elif "not found" in err_msg.lower():
+                 err_msg = "Address or Postcode not found by the council's system."
             
-            raise Exception(f"Script failed: {result.stderr}")
+            raise Exception(f"Script failed: {err_msg}")
 
         # PARSE JSON
         output = result.stdout.strip()
