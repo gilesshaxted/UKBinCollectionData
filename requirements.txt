@@ -7,3 +7,4 @@ dateparser
 requests
 holidays
 urllib3
+pandas
