@@ -57,33 +57,61 @@ def home():
 
 @app.get("/get_councils")
 def get_councils():
-    if collect_data is None:
-         return {"error": f"Server Misconfigured: {import_error}"}
+    # Attempt to list councils from the file system even if the library failed to import
+    councils = []
+    errors = []
     
+    # Strategy 1: File System Walk (Most Robust)
     try:
-        # Locate the councils package directory dynamically
-        # This assumes uk_bin_collection.councils is a package (has __init__.py)
-        # If not, we might need to look in the folder structure manually
-        import uk_bin_collection.councils
-        package_path = os.path.dirname(uk_bin_collection.councils.__file__)
+        # Check probable paths based on common repo structures
+        current_dir = os.getcwd()
+        search_paths = [
+            os.path.join(current_dir, "uk_bin_collection", "uk_bin_collection", "councils"),
+            os.path.join(current_dir, "uk_bin_collection", "councils"),
+            os.path.join(current_dir, "councils")
+        ]
         
-        councils = []
-        for file in os.listdir(package_path):
-            if file.endswith(".py") and not file.startswith("__"):
-                councils.append(file[:-3]) # remove .py extension
-        councils.sort()
-        return {"councils": councils}
-    except Exception as e:
-        # Fallback: Try to find the path relative to current working directory
-        try:
-            possible_path = os.path.join(os.getcwd(), "uk_bin_collection", "councils")
-            if os.path.exists(possible_path):
-                councils = [f[:-3] for f in os.listdir(possible_path) if f.endswith(".py") and not f.startswith("__")]
+        found_path = None
+        for path in search_paths:
+            if os.path.exists(path) and os.path.isdir(path):
+                found_path = path
+                break
+        
+        if found_path:
+            for file in os.listdir(found_path):
+                if file.endswith(".py") and not file.startswith("__"):
+                    councils.append(file[:-3]) # remove .py extension
+            
+            if councils:
                 councils.sort()
                 return {"councils": councils}
-        except:
-            pass
-        return {"error": f"Could not list councils: {str(e)}"}
+            else:
+                errors.append(f"Found folder {found_path} but it was empty.")
+        else:
+             errors.append("Could not locate 'councils' folder on disk.")
+
+    except Exception as e:
+        errors.append(f"File system error: {str(e)}")
+
+    # Strategy 2: Python Import (Fallback if Strategy 1 failed but library is loaded)
+    if collect_data is not None:
+        try:
+            import uk_bin_collection.councils
+            package_path = os.path.dirname(uk_bin_collection.councils.__file__)
+            for file in os.listdir(package_path):
+                if file.endswith(".py") and not file.startswith("__"):
+                    councils.append(file[:-3])
+            councils.sort()
+            return {"councils": councils}
+        except Exception as e:
+            errors.append(f"Import strategy error: {str(e)}")
+            
+    # If we got here, both failed
+    return {
+        "error": "Could not list councils.", 
+        "details": errors, 
+        "server_import_status": import_error
+    }
 
 @app.get("/get_addresses")
 def get_addresses(postcode: str, module: str):
