@@ -7,6 +7,7 @@ import os
 import sys
 import logging
 import subprocess
+import re
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -21,9 +22,6 @@ collect_data_path = None
 for root, dirs, files in os.walk(current_dir):
     if "collect_data.py" in files:
         collect_data_path = os.path.join(root, "collect_data.py")
-        # We also need to find the root folder to set PYTHONPATH
-        # Usually the parent of the parent of collect_data.py, or similar.
-        # We will add the current working directory to PYTHONPATH to be safe.
         break
 
 if collect_data_path:
@@ -66,8 +64,12 @@ def get_councils():
         if found_councils_path:
             for file in os.listdir(found_councils_path):
                 if file.endswith(".py") and not file.startswith("__"):
-                    councils.append(file[:-3]) # remove .py extension
+                    raw_name = file[:-3] # remove .py extension
+                    # Add space before capitals (e.g., WiltshireCouncil -> Wiltshire Council)
+                    formatted_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', raw_name)
+                    councils.append(formatted_name)
             councils.sort()
+            logger.info(f"Returning {len(councils)} councils.")
             return {"councils": councils}
         else:
             errors.append("Could not locate 'councils' folder.")
@@ -79,8 +81,9 @@ def get_councils():
 
 @app.get("/get_addresses")
 def get_addresses(postcode: str, module: str):
-    # Sanity check: does the council file exist?
-    # This acts as a mock search. Real scrapers often need the full run.
+    # Sanity check: clean module name (remove spaces for file check)
+    clean_module = module.replace(" ", "")
+    
     return [{"uprn": postcode, "address": f"Address lookup for {postcode} (Select to continue)"}]
 
 @app.post("/get_bins")
@@ -89,40 +92,40 @@ def get_bins(req: BinRequest):
         raise HTTPException(status_code=500, detail="Server misconfigured: collect_data.py not found.")
 
     try:
-        logger.info(f"Subprocess: Running {req.module} with {req.address_data}")
+        # Convert "Wiltshire Council" back to "WiltshireCouncil"
+        module_name = req.module.replace(" ", "")
+        
+        logger.info(f"Subprocess: Running {module_name} with {req.address_data}")
         
         # Prepare Environment (ensure PYTHONPATH includes current dir)
         env = os.environ.copy()
         env["PYTHONPATH"] = os.getcwd() + os.pathsep + env.get("PYTHONPATH", "")
 
         # COMMAND: python collect_data.py <module> <address>
-        # Note: Some councils require the URL, some the UPRN, some the postcode.
-        # We pass whatever came from the frontend.
-        cmd = [sys.executable, collect_data_path, req.module, req.address_data]
+        cmd = [sys.executable, collect_data_path, module_name, req.address_data]
         
         # Run the command and capture output
         result = subprocess.run(cmd, capture_output=True, text=True, env=env)
         
         # LOGGING OUTPUTS FOR DEBUGGING
         if result.stdout:
-            logger.info(f"STDOUT: {result.stdout[:200]}...") # Log first 200 chars
+            logger.info(f"STDOUT: {result.stdout[:200]}...") 
         if result.stderr:
             logger.error(f"STDERR: {result.stderr}")
 
         if result.returncode != 0:
+            # Check for specific "MissingSchema" error which means user sent postcode instead of URL
+            if "MissingSchema" in result.stderr or "Invalid URL" in result.stderr:
+                raise HTTPException(status_code=400, detail="This council requires a Web Link (URL) to the calendar, not a postcode. Please visit your council website, find your calendar page, and paste that URL here.")
+            
             raise Exception(f"Script failed: {result.stderr}")
 
         # PARSE JSON
-        # The script prints JSON to stdout. 
-        # Sometimes it prints logs before the JSON. We need to find the JSON part.
         output = result.stdout.strip()
         
-        # Attempt to parse the whole output
         try:
             return json.loads(output)
         except json.JSONDecodeError:
-            # If logs are mixed in, try to find the last JSON object
-            # This is a bit hacky but often necessary if logging isn't silenced
             import re
             json_match = re.search(r'(\{.*"bins".*\})', output, re.DOTALL)
             if json_match:
@@ -130,6 +133,8 @@ def get_bins(req: BinRequest):
             else:
                 raise Exception(f"Could not parse JSON from output: {output[:100]}...")
 
+    except HTTPException as he:
+        raise he
     except Exception as e:
         logger.error(f"Execution Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
