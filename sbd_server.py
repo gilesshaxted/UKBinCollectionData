@@ -103,21 +103,26 @@ def get_bins(req: BinRequest):
         env["PYTHONPATH"] = os.getcwd() + os.pathsep + env.get("PYTHONPATH", "")
 
         # COMMAND CONSTRUCTION
-        # python collect_data.py <module> [ARGS]
+        # python collect_data.py <module> <URL> [ARGS]
         cmd = [sys.executable, collect_data_path, module_name]
 
-        # Intelligent Flag Detection
+        # Intelligent Argument Construction
         if input_data.lower().startswith("http"):
-            # It's a URL, pass as positional argument
-            cmd.append(input_data)
-        elif input_data.isdigit():
-            # It's a UPRN (all digits)
-            cmd.append("-u")
+            # It's a URL - pass it as the mandatory second argument
             cmd.append(input_data)
         else:
-            # Assume Postcode (default fallback)
-            cmd.append("-p")
-            cmd.append(input_data)
+            # It is NOT a URL (Postcode or UPRN).
+            # The script requires a URL argument anyway. We pass a dummy URL.
+            cmd.append("https://example.com") 
+            
+            if input_data.isdigit():
+                # It's a UPRN
+                cmd.append("-u")
+                cmd.append(input_data)
+            else:
+                # Assume Postcode
+                cmd.append("-p")
+                cmd.append(input_data)
         
         # Run the command and capture output
         result = subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -132,7 +137,7 @@ def get_bins(req: BinRequest):
             # Check for common errors to give better feedback
             err_msg = result.stderr
             if "MissingSchema" in err_msg:
-                 err_msg = "This council might require a URL but a Postcode was provided. Check if the council supports postcode search."
+                 err_msg = "This council might require a valid URL but a Postcode was provided. The scraper attempted to load a placeholder URL and failed."
             elif "not found" in err_msg.lower():
                  err_msg = "Address or Postcode not found by the council's system."
             
