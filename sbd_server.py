@@ -96,7 +96,6 @@ def get_bins(req: BinRequest):
         module_name = req.module.replace(" ", "")
         
         input_data = req.address_data.strip()
-        logger.info(f"Subprocess: Running {module_name} with input '{input_data}'")
         
         # Prepare Environment (ensure PYTHONPATH includes current dir)
         env = os.environ.copy()
@@ -109,6 +108,7 @@ def get_bins(req: BinRequest):
         # Intelligent Argument Construction
         if input_data.lower().startswith("http"):
             # It's a URL - pass it as the mandatory second argument
+            logger.info(f"Subprocess: Running {module_name} with URL '{input_data}'")
             cmd.append(input_data)
         else:
             # It is NOT a URL (Postcode or UPRN).
@@ -117,12 +117,25 @@ def get_bins(req: BinRequest):
             
             if input_data.isdigit():
                 # It's a UPRN
+                logger.info(f"Subprocess: Running {module_name} with UPRN '{input_data}'")
                 cmd.append("-u")
                 cmd.append(input_data)
             else:
-                # Assume Postcode
+                # Assume Postcode - Apply UK Postcode Formatting logic
                 cmd.append("-p")
-                cmd.append(input_data)
+                
+                # Normalize: Uppercase and remove spaces
+                pc_clean = input_data.replace(" ", "").upper()
+                
+                # Re-insert space (UK postcodes are generally: Outcode + Space + Incode (3 chars))
+                # If length is > 4, we assume the last 3 are the Incode.
+                if len(pc_clean) >= 5 and len(pc_clean) <= 7:
+                    pc_formatted = pc_clean[:-3] + " " + pc_clean[-3:]
+                    logger.info(f"Subprocess: Running {module_name} with formatted Postcode '{pc_formatted}'")
+                    cmd.append(pc_formatted)
+                else:
+                    logger.info(f"Subprocess: Running {module_name} with raw Postcode '{input_data}'")
+                    cmd.append(input_data)
         
         # Run the command and capture output
         result = subprocess.run(cmd, capture_output=True, text=True, env=env)
