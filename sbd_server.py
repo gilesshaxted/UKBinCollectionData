@@ -39,7 +39,7 @@ class BinRequest(BaseModel):
 def home():
     return {
         "status": "OK", 
-        "message": "Bin API is running.", 
+        "message": "Bin API is running (v2.5 - Verbose Logging).", 
         "script_path": collect_data_path,
         "cwd": os.getcwd()
     }
@@ -108,6 +108,7 @@ def get_bins(req: BinRequest):
         # Intelligent Argument Construction
         if input_data.lower().startswith("http"):
             # It's a URL - pass it as the mandatory second argument
+            logger.info(f"DETECTED MODE: URL")
             logger.info(f"Subprocess: Running {module_name} with URL '{input_data}'")
             cmd.append(input_data)
         else:
@@ -115,13 +116,16 @@ def get_bins(req: BinRequest):
             # The script requires a URL argument anyway. We pass a dummy URL.
             cmd.append("https://example.com") 
             
+            # Check if strictly digits
             if input_data.isdigit():
                 # It's a UPRN
+                logger.info(f"DETECTED MODE: UPRN")
                 logger.info(f"Subprocess: Running {module_name} with UPRN '{input_data}'")
                 cmd.append("-u")
                 cmd.append(input_data)
             else:
                 # Assume Postcode - Apply UK Postcode Formatting logic
+                logger.info(f"DETECTED MODE: POSTCODE")
                 cmd.append("-p")
                 
                 # Normalize: Uppercase and remove spaces
@@ -134,6 +138,7 @@ def get_bins(req: BinRequest):
                     logger.info(f"Subprocess: Running {module_name} with formatted Postcode '{pc_formatted}'")
                     cmd.append(pc_formatted)
                 else:
+                    # Fallback for short/weird postcodes
                     logger.info(f"Subprocess: Running {module_name} with raw Postcode '{input_data}'")
                     cmd.append(input_data)
         
@@ -167,7 +172,8 @@ def get_bins(req: BinRequest):
             if json_match:
                 return json.loads(json_match.group(1))
             else:
-                raise Exception(f"Could not parse JSON from output: {output[:100]}...")
+                # If we have output but no JSON, it might be an error printed to stdout
+                raise Exception(f"Could not parse JSON from output. Raw output start: {output[:100]}...")
 
     except HTTPException as he:
         raise he
