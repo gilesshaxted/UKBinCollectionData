@@ -40,59 +40,157 @@ class BinRequest(BaseModel):
     address_data: str
     module: str
 
-# --- UPRN LOOKUP HELPER ---
-def lookup_uprn_public(postcode, house_identifier):
+# --- ADDRESS LOOKUP ENGINE ---
+def fetch_public_addresses(postcode):
     """
-    Attempts to find a UPRN for a given postcode and house name/number
-    by querying a public directory (uprn.uk).
+    Scrapes a public directory (uprn.uk) to return a list of 
+    address-to-UPRN mappings for a given postcode.
     """
+    results = []
     try:
         clean_pc = postcode.replace(" ", "").strip()
         url = f"https://www.uprn.uk/addresses/{clean_pc}"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
         
-        logger.info(f"UPRN LOOKUP: Querying {url} for '{house_identifier}'")
+        logger.info(f"ADDRESS LOOKUP: Fetching address list for {clean_pc}")
         response = requests.get(url, headers=headers, timeout=5)
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            # The site lists addresses in table rows or list items.
-            # We look for text that contains our house identifier.
-            
-            # Simple fuzzy match strategy
-            target = house_identifier.lower()
-            
             # Find all links that might be UPRN links
             links = soup.find_all('a', href=True)
             for link in links:
-                txt = link.get_text().lower()
                 href = link['href']
-                
-                # Check if this link looks like a UPRN link (/uprn/12345)
+                # Check for UPRN link pattern
                 if "/uprn/" in href:
-                    # Check if the address text contains our house name/number
-                    # We check strict components to avoid "1" matching "10"
-                    # But for names like "High Trees", a substring check is usually safe enough for now.
-                    if target in txt:
-                        # Extract UPRN from text or href
-                        uprn_match = re.search(r'\d{8,12}', href)
-                        if uprn_match:
-                            found_uprn = uprn_match.group(0)
-                            logger.info(f"UPRN LOOKUP: Found match! {txt} -> {found_uprn}")
-                            return found_uprn
-            
-            logger.info("UPRN LOOKUP: No match found on page.")
+                    uprn_match = re.search(r'\d{8,12}', href)
+                    if uprn_match:
+                        uprn = uprn_match.group(0)
+                        # Clean up address text
+                        address_text = link.get_text().strip()
+                        address_text = re.sub(r'\s+', ' ', address_text) # Remove extra whitespace
+                        
+                        results.append({
+                            "uprn": uprn,
+                            "address": address_text
+                        })
+            logger.info(f"ADDRESS LOOKUP: Found {len(results)} addresses.")
         else:
-            logger.warning(f"UPRN LOOKUP: Failed to fetch page. Status: {response.status_code}")
+            logger.warning(f"ADDRESS LOOKUP: Failed to fetch page. Status: {response.status_code}")
             
     except Exception as e:
-        logger.error(f"UPRN LOOKUP ERROR: {e}")
+        logger.error(f"ADDRESS LOOKUP ERROR: {e}")
+        
+    return results
+
+def lookup_uprn_public(postcode, house_identifier):
+    """
+    Attempts to find a single UPRN by filtering the list from fetch_public_addresses
+    against a house identifier (number or name).
+    """
+    addresses = fetch_public_addresses(postcode)
+    target = house_identifier.lower()
     
+    for item in addresses:
+        addr_text = item["address"].lower()
+        # Check if house identifier matches start of string or is contained clearly
+        if target in addr_text:
+            logger.info(f"UPRN AUTO-MATCH: '{house_identifier}' matched '{item['address']}' -> {item['uprn']}")
+            return item["uprn"]
+            
     return None
+
+# --- STANDARD API HANDLER ---
+def get_standard_api_bins(base_url, uprn):
+    """
+    Queries an API that conforms to the UK Waste Service Standards.
+    See: https://communitiesuk.github.io/waste-service-standards/apis/waste_services.html
+    """
+    bins = []
+    
+    # Clean URL
+    base_url = base_url.strip().rstrip("/")
+    if not base_url.startswith("http"):
+        base_url = "https://" + base_url
+    
+    # 1. Get Services
+    services_url = f"{base_url}/services"
+    params = {"uprn": uprn}
+    
+    logger.info(f"STANDARD API: Fetching services from {services_url} for UPRN {uprn}")
+    
+    try:
+        resp = requests.get(services_url, params=params, timeout=15)
+        if resp.status_code == 404:
+             raise Exception(f"Endpoint not found: {services_url}")
+        resp.raise_for_status()
+        
+        try:
+            services_data = resp.json()
+        except:
+             raise Exception("API returned non-JSON response")
+
+        # 2. Iterate through services
+        for service in services_data:
+            next_colls = service.get("next_collections", [])
+            
+            if not next_colls:
+                service_id_url = service.get("@id") or service.get("id")
+                
+                # Construct detail URL
+                if str(service_id_url).startswith("http"):
+                    detail_url = service_id_url
+                else:
+                    if "/" in str(service_id_url):
+                         detail_url = str(service_id_url)
+                         if not detail_url.startswith("http"):
+                             if detail_url.startswith("/"):
+                                 detail_url = f"{base_url}{detail_url}"
+                             else:
+                                 detail_url = f"{base_url}/{detail_url}"
+                    else:
+                        detail_url = f"{base_url}/services/{service_id_url}"
+                
+                logger.info(f"STANDARD API: Fetching details from {detail_url}")
+                try:
+                    detail_resp = requests.get(detail_url, params={"uprn": uprn}, timeout=10)
+                    if detail_resp.status_code == 200:
+                        service = detail_resp.json()
+                        next_colls = service.get("next_collections", [])
+                except Exception as e:
+                    logger.warning(f"Failed to fetch details for service {service.get('name')}: {e}")
+            
+            # 3. Process Collections
+            bin_type = service.get("name", "Unknown Bin")
+            
+            for coll in next_colls:
+                date_str = coll.get("start_date")
+                if date_str:
+                    try:
+                        if "T" in date_str:
+                            date_only = date_str.split("T")[0]
+                            y, m, d = date_only.split("-")
+                            formatted_date = f"{d}/{m}/{y}"
+                        else:
+                            formatted_date = date_str
+                            
+                        bins.append({
+                            "bin": bin_type,
+                            "date": formatted_date
+                        })
+                    except Exception as e:
+                        logger.warning(f"STANDARD API: Date parse error for {date_str}: {e}")
+
+        return {"bins": bins}
+
+    except Exception as e:
+        logger.error(f"STANDARD API ERROR: {e}")
+        raise HTTPException(status_code=500, detail=f"Standard API connection failed: {str(e)}")
+
 
 @app.get("/")
 def home():
-    return {"status": "OK", "message": "Bin API is running (v3.3 - UPRN Auto-Lookup)."}
+    return {"status": "OK", "message": "Bin API is running (v3.5 - Address Search Enabled)."}
 
 @app.get("/get_councils")
 def get_councils():
@@ -123,7 +221,17 @@ def get_councils():
 
 @app.get("/get_addresses")
 def get_addresses(postcode: str, module: str):
-    return [{"uprn": postcode, "address": f"Address lookup for {postcode} (Select to continue)"}]
+    """
+    Returns a list of addresses and their UPRNs for a given postcode.
+    Used to populate dropdowns in UI.
+    """
+    addresses = fetch_public_addresses(postcode)
+    
+    if addresses:
+        return addresses
+    else:
+        # Fallback if no addresses found
+        return [{"uprn": "error", "address": f"No addresses found for {postcode}. Please check format."}]
 
 @app.post("/get_bins")
 def get_bins(req: BinRequest):
@@ -154,41 +262,62 @@ def get_bins(req: BinRequest):
         used_dummy_postcode = False 
 
         # --- INTELLIGENT PARSING LOGIC ---
-        if input_data.lower().startswith("http"):
-            logger.info(f"DETECTED MODE: URL")
-            cmd.append(input_data)
+        detected_url = None
+        extracted_uprn = None
+        extracted_postcode = ""
+        remaining_text = input_data
         
+        # 1. Extract URL if present
+        url_match = re.search(r'https?://[^\s]+', input_data)
+        if url_match:
+             detected_url = url_match.group(0)
+             remaining_text = input_data.replace(detected_url, "").strip()
+        elif input_data.lower().startswith("http"):
+             detected_url = input_data.split(" ")[0]
+             remaining_text = input_data.replace(detected_url, "").strip()
+
+        # 2. Extract Postcode
+        pc_pattern = r'([Gg][Ii][Rr] 0[Aa]{2})|((([A-Za-z][0-9]{1,2})|(([A-Za-z][A-Ha-hJ-Yj-y][0-9]{1,2})|(([A-Za-z][0-9][A-Za-z])|([A-Za-z][A-Ha-hJ-Yj-y][0-9][A-Za-z]?))))\s?[0-9][A-Za-z]{2})'
+        pc_match = re.search(pc_pattern, remaining_text)
+        if pc_match:
+            extracted_postcode = pc_match.group(0).upper()
+            remaining_text = remaining_text.replace(extracted_postcode, "").strip()
+
+        # 3. Detect UPRN (Standalone 8-12 digits)
+        uprn_match = re.search(r'\b\d{8,12}\b', remaining_text)
+        if uprn_match:
+            extracted_uprn = uprn_match.group(0)
+
+        # --- BRANCH: STANDARD API ---
+        if module_name.lower() == "standard_waste_api":
+            if not detected_url or not extracted_uprn:
+                 raise HTTPException(status_code=400, detail="Standard API requires both a URL and a UPRN in the input.")
+            
+            logger.info("Executing Native Standard API Handler")
+            json_data = get_standard_api_bins(detected_url, extracted_uprn)
+            
+            BIN_CACHE[cache_key] = {"timestamp": time.time(), "data": json_data}
+            return json_data
+
+        # --- BRANCH: SUBPROCESS (SCRAPER) ---
+        if detected_url:
+            logger.info(f"DETECTED MODE: URL")
+            cmd.append(detected_url)
         else:
             cmd.append("https://example.com") 
-
-            # Extract Postcode
-            pc_pattern = r'([Gg][Ii][Rr] 0[Aa]{2})|((([A-Za-z][0-9]{1,2})|(([A-Za-z][A-Ha-hJ-Yj-y][0-9]{1,2})|(([A-Za-z][0-9][A-Za-z])|([A-Za-z][A-Ha-hJ-Yj-y][0-9][A-Za-z]?))))\s?[0-9][A-Za-z]{2})'
-            pc_match = re.search(pc_pattern, input_data)
             
-            extracted_postcode = ""
-            remaining_text = input_data
-            
-            if pc_match:
-                extracted_postcode = pc_match.group(0).upper()
-                remaining_text = input_data.replace(extracted_postcode, "").strip()
-            
-            # Detect UPRN
-            uprn_match = re.search(r'\b\d{8,12}\b', remaining_text)
-            
-            # --- ARGUMENT ASSEMBLY ---
-            if uprn_match:
-                # Case A: User provided UPRN explicitly
-                uprn = uprn_match.group(0)
-                logger.info(f"DETECTED MODE: UPRN (Explicit: {uprn})")
+            if extracted_uprn:
+                # Case A: User provided UPRN (explicitly or via dropdown selection)
+                logger.info(f"DETECTED MODE: UPRN (Explicit: {extracted_uprn})")
                 cmd.append("-u")
-                cmd.append(uprn)
+                cmd.append(extracted_uprn)
                 
                 if extracted_postcode:
                     cmd.append("-p")
                     cmd.append(extracted_postcode)
                 else:
                     cmd.append("-p")
-                    cmd.append("BA14 8JN")
+                    cmd.append("BA14 8JN") # Dummy postcode often required by scrapers
                     used_dummy_postcode = True
             
             else:
@@ -199,20 +328,19 @@ def get_bins(req: BinRequest):
                     house_identifier = remaining_text.strip(",. ")
                     
                     # --- AUTO-LOOKUP ATTEMPT ---
+                    # Use our new internal function to resolve the address
                     found_uprn = None
                     if house_identifier:
-                        # Try to find UPRN externally before asking scraper
                         found_uprn = lookup_uprn_public(extracted_postcode, house_identifier)
                     
                     if found_uprn:
-                         # We found it! Switch to UPRN mode.
                          logger.info(f"SWITCHING TO UPRN MODE via Auto-Lookup: {found_uprn}")
                          cmd.append("-u")
                          cmd.append(found_uprn)
                          cmd.append("-p")
                          cmd.append(extracted_postcode)
                     else:
-                        # Fallback to standard scraper logic
+                        # Fallback to standard scraper logic if auto-lookup fails
                         cmd.append("-p")
                         cmd.append(extracted_postcode)
                         if house_identifier:
