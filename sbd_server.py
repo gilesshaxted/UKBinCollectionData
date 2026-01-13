@@ -190,7 +190,7 @@ def get_standard_api_bins(base_url, uprn):
 
 @app.get("/")
 def home():
-    return {"status": "OK", "message": "Bin API is running (v3.5 - Address Search Enabled)."}
+    return {"status": "OK", "message": "Bin API is running (v3.6 - Wiltshire Specific Support)."}
 
 @app.get("/get_councils")
 def get_councils():
@@ -299,58 +299,76 @@ def get_bins(req: BinRequest):
             BIN_CACHE[cache_key] = {"timestamp": time.time(), "data": json_data}
             return json_data
 
+        # --- CONFIGURATION OVERRIDES ---
+        skip_url_fetch = False
+        
+        # Special Handling for Wiltshire Council
+        if module_name.lower() == "wiltshirecouncil":
+            # Wiltshire often needs -s flag and specific Azure URL
+            skip_url_fetch = True
+            if not detected_url:
+                detected_url = "https://ilambassadorformsprod.azurewebsites.net/wastecollectiondays/index"
+                logger.info("Wiltshire: Using default Azure URL")
+
         # --- BRANCH: SUBPROCESS (SCRAPER) ---
         if detected_url:
             logger.info(f"DETECTED MODE: URL")
             cmd.append(detected_url)
         else:
             cmd.append("https://example.com") 
+        
+        # Apply Skip Flag if needed
+        if skip_url_fetch:
+            cmd.append("-s")
+
+        if extracted_uprn:
+            # Case A: User provided UPRN (explicitly or via dropdown selection)
+            logger.info(f"DETECTED MODE: UPRN (Explicit: {extracted_uprn})")
+            cmd.append("-u")
+            cmd.append(extracted_uprn)
             
-            if extracted_uprn:
-                # Case A: User provided UPRN (explicitly or via dropdown selection)
-                logger.info(f"DETECTED MODE: UPRN (Explicit: {extracted_uprn})")
-                cmd.append("-u")
-                cmd.append(extracted_uprn)
+            if extracted_postcode:
+                cmd.append("-p")
+                cmd.append(extracted_postcode)
+            else:
+                # If Wiltshire, we MUST have postcode. Use dummy only if not Wiltshire? 
+                # Actually Wiltshire requires strict matching usually.
+                if module_name.lower() == "wiltshirecouncil":
+                     raise HTTPException(status_code=400, detail="Wiltshire Council requires both UPRN and Postcode.")
+                cmd.append("-p")
+                cmd.append("BA14 8JN") # Dummy postcode
+                used_dummy_postcode = True
+        
+        else:
+            # Case B: Postcode Search (Address Name/Number provided)
+            logger.info(f"DETECTED MODE: POSTCODE SEARCH")
+            
+            if extracted_postcode:
+                house_identifier = remaining_text.strip(",. ")
                 
-                if extracted_postcode:
+                # --- AUTO-LOOKUP ATTEMPT ---
+                found_uprn = None
+                if house_identifier:
+                    found_uprn = lookup_uprn_public(extracted_postcode, house_identifier)
+                
+                if found_uprn:
+                     logger.info(f"SWITCHING TO UPRN MODE via Auto-Lookup: {found_uprn}")
+                     cmd.append("-u")
+                     cmd.append(found_uprn)
+                     cmd.append("-p")
+                     cmd.append(extracted_postcode)
+                else:
+                    # Fallback to standard scraper logic if auto-lookup fails
                     cmd.append("-p")
                     cmd.append(extracted_postcode)
-                else:
-                    cmd.append("-p")
-                    cmd.append("BA14 8JN") # Dummy postcode often required by scrapers
-                    used_dummy_postcode = True
-            
-            else:
-                # Case B: Postcode Search (Address Name/Number provided)
-                logger.info(f"DETECTED MODE: POSTCODE SEARCH")
-                
-                if extracted_postcode:
-                    house_identifier = remaining_text.strip(",. ")
-                    
-                    # --- AUTO-LOOKUP ATTEMPT ---
-                    # Use our new internal function to resolve the address
-                    found_uprn = None
                     if house_identifier:
-                        found_uprn = lookup_uprn_public(extracted_postcode, house_identifier)
-                    
-                    if found_uprn:
-                         logger.info(f"SWITCHING TO UPRN MODE via Auto-Lookup: {found_uprn}")
-                         cmd.append("-u")
-                         cmd.append(found_uprn)
-                         cmd.append("-p")
-                         cmd.append(extracted_postcode)
-                    else:
-                        # Fallback to standard scraper logic if auto-lookup fails
-                        cmd.append("-p")
-                        cmd.append(extracted_postcode)
-                        if house_identifier:
-                            logger.info(f"Adding House Identifier (Name/Number): {house_identifier}")
-                            cmd.append("-n")
-                            cmd.append(house_identifier)
-                else:
-                    logger.info(f"No regex match. Sending raw input as postcode: {input_data}")
-                    cmd.append("-p")
-                    cmd.append(input_data)
+                        logger.info(f"Adding House Identifier (Name/Number): {house_identifier}")
+                        cmd.append("-n")
+                        cmd.append(house_identifier)
+            else:
+                logger.info(f"No regex match. Sending raw input as postcode: {input_data}")
+                cmd.append("-p")
+                cmd.append(input_data)
 
         logger.info(f"Command: {cmd}")
 
