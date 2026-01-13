@@ -14,11 +14,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sbd_server")
 
 # --- PATH FINDER ---
-# We need to find the location of 'collect_data.py' to run it as a subprocess.
 current_dir = os.getcwd()
 collect_data_path = None
-
-# Search for collect_data.py
 for root, dirs, files in os.walk(current_dir):
     if "collect_data.py" in files:
         collect_data_path = os.path.join(root, "collect_data.py")
@@ -37,26 +34,17 @@ class BinRequest(BaseModel):
 
 @app.get("/")
 def home():
-    return {
-        "status": "OK", 
-        "message": "Bin API is running (v2.7 - UPRN Fix).", 
-        "script_path": collect_data_path,
-        "cwd": os.getcwd()
-    }
+    return {"status": "OK", "message": "Bin API is running (v2.9 - House Names & UPRN Fix)."}
 
 @app.get("/get_councils")
 def get_councils():
     councils = []
     errors = []
-    
-    # Strategy: File System Walk
     try:
-        # Search for a folder named 'councils'
         found_councils_path = None
         for root, dirs, files in os.walk(os.getcwd()):
             if "councils" in dirs:
                 found_councils_path = os.path.join(root, "councils")
-                # Check if it looks like the right folder (contains .py files)
                 py_files = [f for f in os.listdir(found_councils_path) if f.endswith(".py")]
                 if len(py_files) > 0:
                     break
@@ -64,26 +52,19 @@ def get_councils():
         if found_councils_path:
             for file in os.listdir(found_councils_path):
                 if file.endswith(".py") and not file.startswith("__"):
-                    raw_name = file[:-3] # remove .py extension
-                    # Add space before capitals (e.g., WiltshireCouncil -> Wiltshire Council)
+                    raw_name = file[:-3]
                     formatted_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', raw_name)
                     councils.append(formatted_name)
             councils.sort()
-            logger.info(f"Returning {len(councils)} councils.")
             return {"councils": councils}
         else:
             errors.append("Could not locate 'councils' folder.")
-            
     except Exception as e:
         errors.append(f"Error listing councils: {str(e)}")
-
     return {"error": "Could not list councils.", "details": errors}
 
 @app.get("/get_addresses")
 def get_addresses(postcode: str, module: str):
-    # Sanity check: clean module name (remove spaces for file check)
-    clean_module = module.replace(" ", "")
-    
     return [{"uprn": postcode, "address": f"Address lookup for {postcode} (Select to continue)"}]
 
 @app.post("/get_bins")
@@ -92,90 +73,103 @@ def get_bins(req: BinRequest):
         raise HTTPException(status_code=500, detail="Server misconfigured: collect_data.py not found.")
 
     try:
-        # Convert "Wiltshire Council" back to "WiltshireCouncil"
         module_name = req.module.replace(" ", "")
-        
         input_data = req.address_data.strip()
-        
-        # Prepare Environment (ensure PYTHONPATH includes current dir)
         env = os.environ.copy()
         env["PYTHONPATH"] = os.getcwd() + os.pathsep + env.get("PYTHONPATH", "")
-
-        # COMMAND CONSTRUCTION
-        # python collect_data.py <module> <URL> [ARGS]
         cmd = [sys.executable, collect_data_path, module_name]
 
-        # Intelligent Argument Construction
-        if input_data.lower().startswith("http"):
-            # It's a URL - pass it as the mandatory second argument
-            logger.info(f"DETECTED MODE: URL")
-            logger.info(f"Subprocess: Running {module_name} with URL '{input_data}'")
-            cmd.append(input_data)
-        else:
-            # It is NOT a URL (Postcode or UPRN).
-            # The script requires a URL argument anyway. We pass a dummy URL.
-            cmd.append("https://example.com") 
-            
-            # Check if strictly digits
-            if input_data.isdigit():
-                # It's a UPRN
-                logger.info(f"DETECTED MODE: UPRN")
-                logger.info(f"Subprocess: Running {module_name} with UPRN '{input_data}'")
-                cmd.append("-u")
-                cmd.append(input_data)
-                
-                # CRITICAL FIX: Some scrapers (like Wiltshire) crash if the postcode argument is missing,
-                # even when a UPRN is provided. We inject a generic valid postcode to satisfy the internal validator.
-                cmd.append("-p")
-                cmd.append("SW1A 1AA") 
-            else:
-                # Assume Postcode - Apply UK Postcode Formatting logic
-                logger.info(f"DETECTED MODE: POSTCODE")
-                cmd.append("-p")
-                
-                # Normalize: Uppercase and remove spaces
-                pc_clean = input_data.replace(" ", "").upper()
-                
-                # Re-insert space (UK postcodes are generally: Outcode + Space + Incode (3 chars))
-                # If length is > 4, we assume the last 3 are the Incode.
-                if len(pc_clean) >= 5 and len(pc_clean) <= 7:
-                    pc_formatted = pc_clean[:-3] + " " + pc_clean[-3:]
-                    logger.info(f"Subprocess: Running {module_name} with formatted Postcode '{pc_formatted}'")
-                    cmd.append(pc_formatted)
-                else:
-                    # Fallback for short/weird postcodes
-                    logger.info(f"Subprocess: Running {module_name} with raw Postcode '{input_data}'")
-                    cmd.append(input_data)
+        # --- INTELLIGENT PARSING LOGIC ---
         
-        # Log the full command for debugging
+        # 1. Check for URL
+        if input_data.lower().startswith("http"):
+            logger.info(f"DETECTED MODE: URL")
+            cmd.append(input_data)
+        
+        else:
+            # We MUST provide a URL argument to satisfy the script, even if using -p/-u
+            cmd.append("https://example.com") 
+
+            # 2. Extract Postcode using Regex
+            # Captures standard UK postcodes (e.g. SW1A 1AA, SN8 1RA, M1 1AA)
+            pc_pattern = r'([Gg][Ii][Rr] 0[Aa]{2})|((([A-Za-z][0-9]{1,2})|(([A-Za-z][A-Ha-hJ-Yj-y][0-9]{1,2})|(([A-Za-z][0-9][A-Za-z])|([A-Za-z][A-Ha-hJ-Yj-y][0-9][A-Za-z]?))))\s?[0-9][A-Za-z]{2})'
+            pc_match = re.search(pc_pattern, input_data)
+            
+            extracted_postcode = ""
+            remaining_text = input_data
+            
+            if pc_match:
+                extracted_postcode = pc_match.group(0).upper()
+                # Remove postcode from input to see what is left (House Number/Name/UPRN)
+                remaining_text = input_data.replace(extracted_postcode, "").strip()
+            
+            # 3. Detect UPRN in the remaining text (Look for long number sequence)
+            uprn_match = re.search(r'\b\d{8,12}\b', remaining_text) # UPRNs are usually 12 digits, sometimes fewer
+            
+            if uprn_match:
+                uprn = uprn_match.group(0)
+                logger.info(f"DETECTED MODE: UPRN ({uprn})")
+                cmd.append("-u")
+                cmd.append(uprn)
+                
+                # If we also found a postcode, pass it to help validation!
+                if extracted_postcode:
+                    logger.info(f"Adding accompanying Postcode: {extracted_postcode}")
+                    cmd.append("-p")
+                    cmd.append(extracted_postcode)
+                else:
+                    # Fallback Dummy Postcode (Wiltshire HQ) to prevent crash if scraper demands one
+                    logger.info(f"Adding Dummy Postcode (Wiltshire HQ) for validation")
+                    cmd.append("-p")
+                    cmd.append("BA14 8JN")
+            
+            else:
+                # 4. Standard Address/Postcode Search
+                logger.info(f"DETECTED MODE: POSTCODE SEARCH")
+                
+                if extracted_postcode:
+                    cmd.append("-p")
+                    cmd.append(extracted_postcode)
+                    
+                    # Anything left over is likely the House Name or Number
+                    # Remove punctuation/extra spaces
+                    house_identifier = remaining_text.strip(",. ")
+                    if house_identifier:
+                        logger.info(f"Adding House Identifier (Name/Number): {house_identifier}")
+                        cmd.append("-n")
+                        cmd.append(house_identifier)
+                else:
+                    # Fallback: User typed something that doesn't look like a postcode.
+                    # Send it raw as postcode and hope.
+                    logger.info(f"No regex match. Sending raw input as postcode: {input_data}")
+                    cmd.append("-p")
+                    cmd.append(input_data)
+
+        # Log command
         logger.info(f"Command: {cmd}")
 
-        # Run the command and capture output
         result = subprocess.run(cmd, capture_output=True, text=True, env=env)
         
-        # LOGGING OUTPUTS FOR DEBUGGING
         if result.stdout:
-            logger.info(f"STDOUT: {result.stdout[:200]}...") 
+            logger.info(f"STDOUT: {result.stdout[:200]}...")
         if result.stderr:
             logger.error(f"STDERR: {result.stderr}")
 
         if result.returncode != 0:
-            # Check for common errors to give better feedback
             err_msg = result.stderr
             if "MissingSchema" in err_msg:
-                 err_msg = "This council might require a valid URL but a Postcode was provided. The scraper attempted to load a placeholder URL and failed."
+                 err_msg = "Scraper failed on placeholder URL. This council might require a specific URL."
             elif "not found" in err_msg.lower():
-                 err_msg = "Address or Postcode not found by the council's system."
-            
+                 err_msg = "Address not found."
             raise Exception(f"Script failed: {err_msg}")
 
-        # PARSE JSON
         output = result.stdout.strip()
         
-        # UX: Intercept common scraper failure messages to give helpful advice
-        if "Invalid UPRN" in output:
-             raise HTTPException(status_code=400, detail="The Council's system could not find this postcode. Please find your 12-digit UPRN (Unique Property Reference Number) from 'uprn.uk' and enter that number instead.")
-
+        # UX: Handle empty bins or specific errors in output
+        if '"bins": []' in output:
+             logger.warning("Scraper returned empty bins list.")
+             # We return it anyway so the frontend can say "No bins found"
+        
         try:
             return json.loads(output)
         except json.JSONDecodeError:
@@ -184,8 +178,7 @@ def get_bins(req: BinRequest):
             if json_match:
                 return json.loads(json_match.group(1))
             else:
-                # If we have output but no JSON, it might be an error printed to stdout
-                raise Exception(f"Could not parse JSON from output. Raw output start: {output[:100]}...")
+                raise Exception(f"Could not parse JSON. Output start: {output[:100]}...")
 
     except HTTPException as he:
         raise he
