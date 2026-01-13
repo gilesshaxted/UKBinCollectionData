@@ -8,10 +8,17 @@ import sys
 import logging
 import subprocess
 import re
+import time
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sbd_server")
+
+# --- GLOBAL CACHE ---
+# Stores bin data in memory to make ICS/Calendar requests instant.
+# Format: { "unique_key": { "timestamp": 123456789, "data": {...} } }
+BIN_CACHE = {}
+CACHE_DURATION = 86400  # 24 Hours
 
 # --- PATH FINDER ---
 current_dir = os.getcwd()
@@ -34,7 +41,7 @@ class BinRequest(BaseModel):
 
 @app.get("/")
 def home():
-    return {"status": "OK", "message": "Bin API is running (v3.1 - Empty Bin Fix)."}
+    return {"status": "OK", "message": "Bin API is running (v3.2 - Caching Enabled)."}
 
 @app.get("/get_councils")
 def get_councils():
@@ -75,25 +82,37 @@ def get_bins(req: BinRequest):
     try:
         module_name = req.module.replace(" ", "")
         input_data = req.address_data.strip()
+        
+        # --- CACHE CHECK ---
+        # Generate a unique key for this request
+        cache_key = f"{module_name}|{input_data.lower()}"
+        current_time = time.time()
+        
+        if cache_key in BIN_CACHE:
+            cached_item = BIN_CACHE[cache_key]
+            if current_time - cached_item["timestamp"] < CACHE_DURATION:
+                logger.info(f"CACHE HIT: Returning saved data for {input_data}")
+                return cached_item["data"]
+            else:
+                logger.info(f"CACHE EXPIRED: Refreshing data for {input_data}")
+                del BIN_CACHE[cache_key]
+        
+        # --- PREPARE SUBPROCESS ---
         env = os.environ.copy()
         env["PYTHONPATH"] = os.getcwd() + os.pathsep + env.get("PYTHONPATH", "")
         cmd = [sys.executable, collect_data_path, module_name]
         
-        used_dummy_postcode = False # Track if we used a fallback postcode
+        used_dummy_postcode = False 
 
         # --- INTELLIGENT PARSING LOGIC ---
-        
-        # 1. Check for URL
         if input_data.lower().startswith("http"):
             logger.info(f"DETECTED MODE: URL")
             cmd.append(input_data)
         
         else:
-            # We MUST provide a URL argument to satisfy the script, even if using -p/-u
-            cmd.append("https://example.com") 
+            cmd.append("https://example.com") # URL Placeholder
 
-            # 2. Extract Postcode using Regex
-            # Captures standard UK postcodes (e.g. SW1A 1AA, SN8 1RA, M1 1AA)
+            # Extract Postcode using Regex
             pc_pattern = r'([Gg][Ii][Rr] 0[Aa]{2})|((([A-Za-z][0-9]{1,2})|(([A-Za-z][A-Ha-hJ-Yj-y][0-9]{1,2})|(([A-Za-z][0-9][A-Za-z])|([A-Za-z][A-Ha-hJ-Yj-y][0-9][A-Za-z]?))))\s?[0-9][A-Za-z]{2})'
             pc_match = re.search(pc_pattern, input_data)
             
@@ -102,11 +121,10 @@ def get_bins(req: BinRequest):
             
             if pc_match:
                 extracted_postcode = pc_match.group(0).upper()
-                # Remove postcode from input to see what is left (House Number/Name/UPRN)
                 remaining_text = input_data.replace(extracted_postcode, "").strip()
             
-            # 3. Detect UPRN in the remaining text (Look for long number sequence)
-            uprn_match = re.search(r'\b\d{8,12}\b', remaining_text) # UPRNs are usually 12 digits, sometimes fewer
+            # Detect UPRN
+            uprn_match = re.search(r'\b\d{8,12}\b', remaining_text)
             
             if uprn_match:
                 uprn = uprn_match.group(0)
@@ -114,41 +132,34 @@ def get_bins(req: BinRequest):
                 cmd.append("-u")
                 cmd.append(uprn)
                 
-                # If we also found a postcode, pass it to help validation!
                 if extracted_postcode:
                     logger.info(f"Adding accompanying Postcode: {extracted_postcode}")
                     cmd.append("-p")
                     cmd.append(extracted_postcode)
                 else:
-                    # Fallback Dummy Postcode (Wiltshire HQ) to prevent crash if scraper demands one
                     logger.info(f"Adding Dummy Postcode (Wiltshire HQ) for validation")
                     cmd.append("-p")
                     cmd.append("BA14 8JN")
                     used_dummy_postcode = True
             
             else:
-                # 4. Standard Address/Postcode Search
                 logger.info(f"DETECTED MODE: POSTCODE SEARCH")
                 
                 if extracted_postcode:
                     cmd.append("-p")
                     cmd.append(extracted_postcode)
                     
-                    # Anything left over is likely the House Name or Number
-                    # Remove punctuation/extra spaces
+                    # Clean remaining text to be a valid House Number/Name
                     house_identifier = remaining_text.strip(",. ")
                     if house_identifier:
                         logger.info(f"Adding House Identifier (Name/Number): {house_identifier}")
                         cmd.append("-n")
                         cmd.append(house_identifier)
                 else:
-                    # Fallback: User typed something that doesn't look like a postcode.
-                    # Send it raw as postcode and hope.
                     logger.info(f"No regex match. Sending raw input as postcode: {input_data}")
                     cmd.append("-p")
                     cmd.append(input_data)
 
-        # Log command
         logger.info(f"Command: {cmd}")
 
         result = subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -168,27 +179,31 @@ def get_bins(req: BinRequest):
 
         output = result.stdout.strip()
         
-        # UX: Intercept scraper errors that are printed to stdout but don't cause a non-zero exit code
         if "Exception encountered" in output or "Invalid UPRN" in output:
              raise HTTPException(status_code=400, detail="Address not found by council system. Please try searching with your UPRN (12-digit number) found on 'uprn.uk'.")
 
-        # UX: Handle empty bins or specific errors in output
         if '"bins": []' in output:
-             # Check if we used a dummy postcode with a UPRN
              if used_dummy_postcode:
-                 raise HTTPException(status_code=400, detail="This Council requires you to provide the Postcode alongside the UPRN to verify the address. Please search again entering both, e.g. '100120992798 SN8 1RA'.")
-             
+                 raise HTTPException(status_code=400, detail="This Council requires you to provide the Postcode alongside the UPRN. Please search again entering both, e.g. '100120992798 SN8 1RA'.")
              logger.warning("Scraper returned empty bins list.")
         
         try:
-            return json.loads(output)
+            json_data = json.loads(output)
         except json.JSONDecodeError:
-            # FIX: Do NOT import re here again, use the global one
             json_match = re.search(r'(\{.*"bins".*\})', output, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group(1))
+                json_data = json.loads(json_match.group(1))
             else:
                 raise Exception(f"Could not parse JSON. Output start: {output[:100]}...")
+
+        # --- SAVE TO CACHE ---
+        BIN_CACHE[cache_key] = {
+            "timestamp": time.time(),
+            "data": json_data
+        }
+        logger.info(f"Saved result to CACHE for key: {cache_key}")
+
+        return json_data
 
     except HTTPException as he:
         raise he
