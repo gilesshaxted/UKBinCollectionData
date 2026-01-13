@@ -1,191 +1,274 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import uvicorn
-import importlib
-import json
-import os
-import sys
-import logging
-import subprocess
-import re
+<?php
+/**
+ * Plugin Name: Bin Collection Portal
+ * Description: Postcode and House Number search tool.
+ * Version: 2.5 (UX Update)
+ * Author: Gemini
+ */
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("sbd_server")
+if (!defined('ABSPATH')) {
+    exit;
+}
 
-# --- PATH FINDER ---
-current_dir = os.getcwd()
-collect_data_path = None
-for root, dirs, files in os.walk(current_dir):
-    if "collect_data.py" in files:
-        collect_data_path = os.path.join(root, "collect_data.py")
-        break
+// ---------------------------------------------------------
+// 1. SETTINGS PAGE
+// ---------------------------------------------------------
+add_action('admin_menu', 'sbd_add_admin_menu');
+add_action('admin_init', 'sbd_settings_init');
 
-if collect_data_path:
-    logger.info(f"Found collect_data.py at: {collect_data_path}")
-else:
-    logger.error("CRITICAL: Could not find collect_data.py")
+function sbd_add_admin_menu() {
+    add_options_page('Bin Portal Settings', 'Bin Portal', 'manage_options', 'bin_portal', 'sbd_options_page');
+}
 
-app = FastAPI()
+function sbd_settings_init() {
+    register_setting('sbdPlugin', 'sbd_api_url');
+    register_setting('sbdPlugin', 'sbd_council_module');
+    
+    add_settings_section('sbd_plugin_page_section', 'API Configuration', null, 'bin_portal');
+    add_settings_field('sbd_api_url', 'Python API URL', 'sbd_api_url_render', 'bin_portal', 'sbd_plugin_page_section');
+    add_settings_field('sbd_council_module', 'Council Script', 'sbd_council_module_render', 'bin_portal', 'sbd_plugin_page_section');
+}
 
-class BinRequest(BaseModel):
-    address_data: str
-    module: str
+function sbd_api_url_render() {
+    $default_url = 'https://ukbincollectiondata.onrender.com';
+    $value = get_option('sbd_api_url', $default_url);
+    if(empty($value)) $value = $default_url;
+    echo "<input type='text' name='sbd_api_url' id='sbd_api_input' value='" . esc_attr($value) . "' style='width: 100%; max-width: 400px;'>";
+}
 
-@app.get("/")
-def home():
-    return {"status": "OK", "message": "Bin API is running (v2.9 - House Names & UPRN Fix)."}
-
-@app.get("/get_councils")
-def get_councils():
-    councils = []
-    errors = []
-    try:
-        found_councils_path = None
-        for root, dirs, files in os.walk(os.getcwd()):
-            if "councils" in dirs:
-                found_councils_path = os.path.join(root, "councils")
-                py_files = [f for f in os.listdir(found_councils_path) if f.endswith(".py")]
-                if len(py_files) > 0:
-                    break
+function sbd_council_module_render() {
+    $current_val = get_option('sbd_council_module');
+    ?>
+    <div style="display:flex; gap:10px; align-items:center;">
+        <select name="sbd_council_module" id="sbd_council_select" style="min-width:250px;">
+            <option value="<?php echo esc_attr($current_val); ?>" selected><?php echo esc_html($current_val ? $current_val : 'Select Council...'); ?></option>
+        </select>
+        <button type="button" id="sbd_load_councils" class="button">Refresh List</button>
+    </div>
+    <script>
+    document.getElementById('sbd_load_councils').addEventListener('click', function() {
+        var btn = this;
+        var select = document.getElementById('sbd_council_select');
+        btn.innerText = "Loading...";
         
-        if found_councils_path:
-            for file in os.listdir(found_councils_path):
-                if file.endswith(".py") and not file.startswith("__"):
-                    raw_name = file[:-3]
-                    formatted_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', raw_name)
-                    councils.append(formatted_name)
-            councils.sort()
-            return {"councils": councils}
-        else:
-            errors.append("Could not locate 'councils' folder.")
-    except Exception as e:
-        errors.append(f"Error listing councils: {str(e)}")
-    return {"error": "Could not list councils.", "details": errors}
-
-@app.get("/get_addresses")
-def get_addresses(postcode: str, module: str):
-    return [{"uprn": postcode, "address": f"Address lookup for {postcode} (Select to continue)"}]
-
-@app.post("/get_bins")
-def get_bins(req: BinRequest):
-    if not collect_data_path:
-        raise HTTPException(status_code=500, detail="Server misconfigured: collect_data.py not found.")
-
-    try:
-        module_name = req.module.replace(" ", "")
-        input_data = req.address_data.strip()
-        env = os.environ.copy()
-        env["PYTHONPATH"] = os.getcwd() + os.pathsep + env.get("PYTHONPATH", "")
-        cmd = [sys.executable, collect_data_path, module_name]
-
-        # --- INTELLIGENT PARSING LOGIC ---
+        var data = new FormData();
+        data.append('action', 'sbd_fetch_councils_list');
         
-        # 1. Check for URL
-        if input_data.lower().startswith("http"):
-            logger.info(f"DETECTED MODE: URL")
-            cmd.append(input_data)
-        
-        else:
-            # We MUST provide a URL argument to satisfy the script, even if using -p/-u
-            cmd.append("https://example.com") 
+        fetch('<?php echo admin_url('admin-ajax.php'); ?>', { method: 'POST', body: data })
+        .then(r => r.json())
+        .then(res => {
+            btn.innerText = "Refresh List";
+            if(res.success && res.data.councils) {
+                select.innerHTML = '<option value="">-- Select Council --</option>';
+                res.data.councils.forEach(c => {
+                    var opt = document.createElement('option');
+                    opt.value = c;
+                    opt.innerText = c;
+                    if(c === "<?php echo esc_js($current_val); ?>") opt.selected = true;
+                    select.appendChild(opt);
+                });
+                alert("List updated!");
+            } else {
+                alert("Error fetching list.");
+            }
+        });
+    });
+    </script>
+    <?php
+}
 
-            # 2. Extract Postcode using Regex
-            # Captures standard UK postcodes (e.g. SW1A 1AA, SN8 1RA, M1 1AA)
-            pc_pattern = r'([Gg][Ii][Rr] 0[Aa]{2})|((([A-Za-z][0-9]{1,2})|(([A-Za-z][A-Ha-hJ-Yj-y][0-9]{1,2})|(([A-Za-z][0-9][A-Za-z])|([A-Za-z][A-Ha-hJ-Yj-y][0-9][A-Za-z]?))))\s?[0-9][A-Za-z]{2})'
-            pc_match = re.search(pc_pattern, input_data)
+function sbd_options_page() {
+    ?>
+    <div class="wrap">
+        <h2>Bin Portal Settings</h2>
+        <form action="options.php" method="post">
+            <?php
+            settings_fields('sbdPlugin');
+            do_settings_sections('bin_portal');
+            submit_button();
+            ?>
+        </form>
+    </div>
+    <?php
+}
+
+// ---------------------------------------------------------
+// 2. SHORTCODE: [bin_finder]
+// ---------------------------------------------------------
+add_shortcode('bin_finder', 'sbd_bin_finder_shortcode');
+
+function sbd_bin_finder_shortcode() {
+    ob_start();
+    ?>
+    <div id="sbd-portal">
+        <div id="sbd-search-box">
+            <h3>Find Your Bin Schedule</h3>
+            <p style="font-size:0.9em; color:#666; margin-bottom:10px;">Enter your Postcode, or House Number + Postcode.</p>
+            <div style="display:flex; gap:10px; max-width:500px;">
+                <!-- Updated Placeholder -->
+                <input type="text" id="sbd-postcode" placeholder="e.g. SN8 1RA or 10 SN8 1RA" style="padding:10px; flex-grow:1;">
+                <button onclick="sbdGetSchedule()" style="padding:10px; background:#0073aa; color:white; border:none; cursor:pointer;">Search</button>
+            </div>
+            <div id="sbd-error" style="color:red; margin-top:10px;"></div>
+        </div>
+
+        <div id="sbd-results-area" style="display:none; margin-top:20px;">
+            <h3>Your Collection Dates</h3>
+            <div id="sbd-results" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px;"></div>
             
-            extracted_postcode = ""
-            remaining_text = input_data
-            
-            if pc_match:
-                extracted_postcode = pc_match.group(0).upper()
-                # Remove postcode from input to see what is left (House Number/Name/UPRN)
-                remaining_text = input_data.replace(extracted_postcode, "").strip()
-            
-            # 3. Detect UPRN in the remaining text (Look for long number sequence)
-            uprn_match = re.search(r'\b\d{8,12}\b', remaining_text) # UPRNs are usually 12 digits, sometimes fewer
-            
-            if uprn_match:
-                uprn = uprn_match.group(0)
-                logger.info(f"DETECTED MODE: UPRN ({uprn})")
-                cmd.append("-u")
-                cmd.append(uprn)
-                
-                # If we also found a postcode, pass it to help validation!
-                if extracted_postcode:
-                    logger.info(f"Adding accompanying Postcode: {extracted_postcode}")
-                    cmd.append("-p")
-                    cmd.append(extracted_postcode)
-                else:
-                    # Fallback Dummy Postcode (Wiltshire HQ) to prevent crash if scraper demands one
-                    logger.info(f"Adding Dummy Postcode (Wiltshire HQ) for validation")
-                    cmd.append("-p")
-                    cmd.append("BA14 8JN")
-            
-            else:
-                # 4. Standard Address/Postcode Search
-                logger.info(f"DETECTED MODE: POSTCODE SEARCH")
-                
-                if extracted_postcode:
-                    cmd.append("-p")
-                    cmd.append(extracted_postcode)
-                    
-                    # Anything left over is likely the House Name or Number
-                    # Remove punctuation/extra spaces
-                    house_identifier = remaining_text.strip(",. ")
-                    if house_identifier:
-                        logger.info(f"Adding House Identifier (Name/Number): {house_identifier}")
-                        cmd.append("-n")
-                        cmd.append(house_identifier)
-                else:
-                    # Fallback: User typed something that doesn't look like a postcode.
-                    # Send it raw as postcode and hope.
-                    logger.info(f"No regex match. Sending raw input as postcode: {input_data}")
-                    cmd.append("-p")
-                    cmd.append(input_data)
+            <div style="background:#f9f9f9; padding:15px; border-radius:5px; border:1px solid #eee;">
+                <strong>Subscribe:</strong>
+                <a id="sbd-ics-link" href="#" class="button">📅 ICS / Outlook</a>
+                <a id="sbd-gcal-link" href="#" target="_blank" class="button">G+ Google Calendar</a>
+            </div>
+            <br>
+            <button onclick="location.reload()" style="font-size:0.8em; cursor:pointer;">&larr; Search Again</button>
+        </div>
+    </div>
 
-        # Log command
-        logger.info(f"Command: {cmd}")
-
-        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    <script>
+    function sbdGetSchedule() {
+        const pc = document.getElementById('sbd-postcode').value;
+        const container = document.getElementById('sbd-results');
+        const errorDiv = document.getElementById('sbd-error');
+        const resultsArea = document.getElementById('sbd-results-area');
         
-        if result.stdout:
-            logger.info(f"STDOUT: {result.stdout[:200]}...")
-        if result.stderr:
-            logger.error(f"STDERR: {result.stderr}")
-
-        if result.returncode != 0:
-            err_msg = result.stderr
-            if "MissingSchema" in err_msg:
-                 err_msg = "Scraper failed on placeholder URL. This council might require a specific URL."
-            elif "not found" in err_msg.lower():
-                 err_msg = "Address not found."
-            raise Exception(f"Script failed: {err_msg}")
-
-        output = result.stdout.strip()
+        if(!pc) { errorDiv.innerText = "Please enter a postcode."; return; }
         
-        # UX: Handle empty bins or specific errors in output
-        if '"bins": []' in output:
-             logger.warning("Scraper returned empty bins list.")
-             # We return it anyway so the frontend can say "No bins found"
+        errorDiv.innerText = "Searching... (This can take 10-20 seconds)";
+        container.innerHTML = "Loading...";
         
-        try:
-            return json.loads(output)
-        except json.JSONDecodeError:
-            import re
-            json_match = re.search(r'(\{.*"bins".*\})', output, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group(1))
-            else:
-                raise Exception(f"Could not parse JSON. Output start: {output[:100]}...")
+        const data = new FormData();
+        data.append('action', 'sbd_proxy_bins');
+        data.append('address_data', pc); 
 
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        logger.error(f"Execution Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        fetch('<?php echo admin_url('admin-ajax.php'); ?>', { method: 'POST', body: data })
+        .then(r => r.json())
+        .then(res => {
+            if(!res.success) {
+                // Better error handling for empty results
+                if (res.data && res.data.includes('Script failed')) {
+                     errorDiv.innerText = "Error: " + res.data.replace('Script failed: ', '');
+                } else {
+                     errorDiv.innerText = "Error: " + (res.data || "Unknown server error");
+                }
+                container.innerHTML = "";
+                return;
+            }
+            
+            const bins = res.data.bins || res.data;
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+            if (!bins || !Array.isArray(bins)) {
+                 errorDiv.innerText = "No bin data found. Try adding your house number (e.g. '10 SN8 1RA').";
+                 container.innerHTML = "";
+                 return;
+            }
+
+            if (bins.length === 0) {
+                 errorDiv.innerText = "Council found the address but returned no dates. Please try again later.";
+                 container.innerHTML = "";
+                 return;
+            }
+
+            // Success - Show Results
+            errorDiv.innerText = "";
+            container.innerHTML = "";
+            resultsArea.style.display = 'block';
+
+            bins.forEach(bin => {
+                const div = document.createElement('div');
+                div.style = "border:1px solid #ccc; padding:15px; border-radius:5px; background:#fff; text-align:center;";
+                div.innerHTML = `<strong style='display:block; margin-bottom:5px;'>${bin.type}</strong><span style='font-size:1.2em; color:#0073aa;'>${bin.collectionDate}</span>`;
+                container.appendChild(div);
+            });
+
+            const siteUrl = "<?php echo home_url('/'); ?>";
+            const feedUrl = siteUrl + "?sbd_feed=ics&uprn=" + encodeURIComponent(pc);
+            const webcalUrl = feedUrl.replace("https://", "webcal://").replace("http://", "webcal://");
+            
+            document.getElementById('sbd-ics-link').href = webcalUrl;
+            document.getElementById('sbd-gcal-link').href = "https://www.google.com/calendar/render?cid=" + encodeURIComponent(feedUrl);
+        })
+        .catch(e => {
+            errorDiv.innerText = "System Error. Please try again.";
+        });
+    }
+    </script>
+    <?php
+    return ob_get_clean();
+}
+
+// ---------------------------------------------------------
+// 3. AJAX HANDLERS
+// ---------------------------------------------------------
+function sbd_get_url() {
+    $url = get_option('sbd_api_url');
+    if(empty($url)) $url = 'https://ukbincollectiondata.onrender.com';
+    return rtrim($url, '/');
+}
+
+add_action('wp_ajax_sbd_fetch_councils_list', 'sbd_fetch_councils_list');
+function sbd_fetch_councils_list() {
+    $api_url = sbd_get_url();
+    $response = wp_remote_get("$api_url/get_councils", ['timeout' => 15]);
+    if (is_wp_error($response)) wp_send_json_error();
+    $data = json_decode(wp_remote_retrieve_body($response), true);
+    wp_send_json_success($data);
+}
+
+add_action('wp_ajax_sbd_proxy_bins', 'sbd_ajax_bins');
+add_action('wp_ajax_nopriv_sbd_proxy_bins', 'sbd_ajax_bins');
+
+function sbd_ajax_bins() {
+    $api_url = sbd_get_url();
+    $module = get_option('sbd_council_module');
+    $addr = $_POST['address_data']; 
+
+    $response = wp_remote_post("$api_url/get_bins", [
+        'body' => json_encode(['address_data' => $addr, 'module' => $module]),
+        'headers' => ['Content-Type' => 'application/json'],
+        'timeout' => 120
+    ]);
+
+    if (is_wp_error($response)) wp_send_json_error($response->get_error_message());
+    $data = json_decode(wp_remote_retrieve_body($response), true);
+    if (isset($data['error'])) wp_send_json_error($data['error']);
+    if (isset($data['detail'])) wp_send_json_error($data['detail']);
+    wp_send_json_success($data);
+}
+
+// ---------------------------------------------------------
+// 4. ICS FEED
+// ---------------------------------------------------------
+add_action('init', 'sbd_check_ics_feed');
+function sbd_check_ics_feed() {
+    if (isset($_GET['sbd_feed']) && $_GET['sbd_feed'] == 'ics' && isset($_GET['uprn'])) {
+        $uprn = $_GET['uprn'];
+        $api_url = sbd_get_url();
+        $module = get_option('sbd_council_module');
+
+        $response = wp_remote_post("$api_url/get_bins", [
+            'body' => json_encode(['address_data' => $uprn, 'module' => $module]),
+            'headers' => ['Content-Type' => 'application/json'],
+            'timeout' => 120
+        ]);
+
+        if (is_wp_error($response)) die("Error");
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        $bins = isset($json['bins']) ? $json['bins'] : [];
+
+        header('Content-Type: text/calendar; charset=utf-8');
+        header('Content-Disposition: attachment; filename="bins.ics"');
+        echo "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Bin Portal//EN\r\n";
+        foreach($bins as $bin) {
+            $type = $bin['type'];
+            $dateObj = DateTime::createFromFormat('d/m/Y', $bin['collectionDate']);
+            if (!$dateObj) continue;
+            $dateStr = $dateObj->format('Ymd');
+            $uid = md5($type . $dateStr) . "@binportal";
+            echo "BEGIN:VEVENT\r\nUID:$uid\r\nDTSTART;VALUE=DATE:$dateStr\r\nSUMMARY:Bin: $type\r\nEND:VEVENT\r\n";
+        }
+        echo "END:VCALENDAR";
+        exit;
+    }
+}
