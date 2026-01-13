@@ -1,6 +1,7 @@
 import re
-
+from datetime import datetime
 from bs4 import BeautifulSoup
+import requests
 
 from uk_bin_collection.uk_bin_collection.common import *
 from uk_bin_collection.uk_bin_collection.get_bin_data import AbstractGetBinDataClass
@@ -17,7 +18,7 @@ class CouncilClass(AbstractGetBinDataClass):
         """
         Extract upcoming bin collection dates and their types for the supplied postcode or UPRN.
         
-        Queries the council waste collection calendar for the current month and the next two months, parses the HTML response, and returns a dictionary with a "bins" list containing collection entries.
+        Queries the council waste collection calendar for a rolling 12-month period, parses the HTML response, and returns a dictionary with a "bins" list containing collection entries.
         
         Parameters:
             page (str): Unused parameter retained for interface compatibility.
@@ -33,12 +34,22 @@ class CouncilClass(AbstractGetBinDataClass):
             SystemError: If an HTTP request to the council calendar endpoint does not return status code 200.
         """
         requests.packages.urllib3.disable_warnings()
-        # Define some months to get from the calendar
-        this_month = datetime.now().month
-        this_year = datetime.now().year
-        one_month = this_month + 1
-        two_month = this_month + 2
-        months = [this_month, one_month, two_month]
+        
+        # Define 12 months to get from the calendar (Rolling 12 Months)
+        months_to_fetch = []
+        current_date = datetime.now()
+        start_month = current_date.month
+        start_year = current_date.year
+
+        for i in range(12):
+            # Calculate month and year for this iteration
+            # (month - 1) + i gives a 0-indexed offset.
+            # % 12 gives 0-11 range. + 1 converts back to 1-12.
+            m = (start_month - 1 + i) % 12 + 1
+            # Calculate year increment. 
+            # If start_month + i > 12, we are in next year(s)
+            y = start_year + ((start_month - 1 + i) // 12)
+            months_to_fetch.append((m, y))
 
         # Get and check the postcode and UPRN values
         user_postcode = kwargs.get("postcode")
@@ -75,18 +86,8 @@ class CouncilClass(AbstractGetBinDataClass):
         data_bins = {"bins": []}
 
         # For each of the months we defined
-        for cal_month in months:
-            # If we're in Nov/Dec, the calculations won't work since its just adding one, so roll it
-            # to next year correctly
-            if cal_month == 13:
-                cal_month = 1
-                cal_year = this_year + 1
-            elif cal_month == 14:
-                cal_month = 2
-                cal_year = this_year + 1
-            else:
-                cal_year = this_year
-
+        for cal_month, cal_year in months_to_fetch:
+            
             # Data for the calendar
             data = {
                 "Month": cal_month,
@@ -96,17 +97,23 @@ class CouncilClass(AbstractGetBinDataClass):
             }
 
             # Send it all as a POST
-            response = requests.post(
-                "https://ilambassadorformsprod.azurewebsites.net/wastecollectiondays/wastecollectioncalendar",
-                cookies=cookies,
-                headers=headers,
-                data=data,
-            )
+            try:
+                response = requests.post(
+                    "https://ilambassadorformsprod.azurewebsites.net/wastecollectiondays/wastecollectioncalendar",
+                    cookies=cookies,
+                    headers=headers,
+                    data=data,
+                    timeout=10 # Added timeout for safety
+                )
+            except Exception as e:
+                 # If one month fails, log it but try to continue or re-raise
+                 # For now, we'll re-raise to signal failure
+                 raise SystemError(f"Connection failed for {cal_month}/{cal_year}: {e}")
 
             # If we don't get a HTTP200, throw an error
             if response.status_code != 200:
                 raise SystemError(
-                    "Error retrieving data! Please try again or raise an issue on GitHub!"
+                    f"Error retrieving data for {cal_month}/{cal_year}! Status: {response.status_code}"
                 )
 
             soup = BeautifulSoup(response.text, features="html.parser")
@@ -117,22 +124,35 @@ class CouncilClass(AbstractGetBinDataClass):
             for result in resultscontainer:
                 event = result.find("div", {"class": "events-list"})
                 if event:
-                    collectiondate = datetime.strptime(
-                        result.find("span", class_="day-no")["data-cal-date"],
-                        "%Y-%m-%dT%H:%M:%S",
-                    ).strftime(date_format)
-                    collection_type = result.select_one(
-                        ".rc-event-container span"
-                    ).text.strip()
+                    try:
+                        date_span = result.find("span", class_="day-no")
+                        if not date_span or "data-cal-date" not in date_span.attrs:
+                            continue
 
-                    collection_types = collection_type.split(" and ")
+                        collectiondate = datetime.strptime(
+                            date_span["data-cal-date"],
+                            "%Y-%m-%dT%H:%M:%S",
+                        ).strftime(date_format)
+                        
+                        collection_type_element = result.select_one(".rc-event-container span")
+                        if not collection_type_element:
+                            continue
+                            
+                        collection_type = collection_type_element.text.strip()
 
-                    for type in collection_types:
+                        collection_types = collection_type.split(" and ")
 
-                        dict_data = {
-                            "type": type,
-                            "collectionDate": collectiondate,
-                        }
-                        data_bins["bins"].append(dict_data)
+                        for type in collection_types:
+                            dict_data = {
+                                "type": type,
+                                "collectionDate": collectiondate,
+                            }
+                            # Check for duplicates before adding (just in case overlapping requests occur)
+                            if dict_data not in data_bins["bins"]:
+                                data_bins["bins"].append(dict_data)
+                                
+                    except Exception as e:
+                        # Skip this specific entry if parsing fails, but continue with others
+                        continue
 
         return data_bins
