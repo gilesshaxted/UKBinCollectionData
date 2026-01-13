@@ -165,6 +165,10 @@ def get_bins(req: BinRequest):
 
         output = result.stdout.strip()
         
+        # UX: Intercept scraper errors that are printed to stdout but don't cause a non-zero exit code
+        if "Exception encountered" in output or "Invalid UPRN" in output:
+             raise HTTPException(status_code=400, detail="Address not found by council system. Please try searching with your UPRN (12-digit number) found on 'uprn.uk'.")
+
         # UX: Handle empty bins or specific errors in output
         if '"bins": []' in output:
              logger.warning("Scraper returned empty bins list.")
