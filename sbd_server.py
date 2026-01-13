@@ -40,6 +40,7 @@ app = FastAPI()
 class BinRequest(BaseModel):
     address_data: str
     module: str
+    os_api_key: Optional[str] = None
 
 class AddressRequest(BaseModel):
     postcode: str
@@ -156,6 +157,25 @@ def lookup_uprn_public(postcode, house_identifier):
             
     return None
 
+def lookup_uprn_os(postcode, house_identifier, api_key):
+    """
+    Attempts to find a single UPRN using the OS Places API.
+    """
+    addresses = fetch_os_places_addresses(postcode, api_key)
+    target = house_identifier.lower()
+    
+    # Check for error response first
+    if addresses and "error" in addresses[0].get("uprn", ""):
+        return None
+
+    for item in addresses:
+        addr_text = item["address"].lower()
+        if target in addr_text:
+            logger.info(f"OS UPRN MATCH: '{house_identifier}' matched '{item['address']}' -> {item['uprn']}")
+            return item["uprn"]
+            
+    return None
+
 # --- STANDARD API HANDLER ---
 def get_standard_api_bins(base_url, uprn):
     """
@@ -246,7 +266,7 @@ def get_standard_api_bins(base_url, uprn):
 
 @app.get("/")
 def home():
-    return {"status": "OK", "message": "Bin API is running (v3.7 - OS Places API Support)."}
+    return {"status": "OK", "message": "Bin API is running (v3.8 - OS API Integration)."}
 
 @app.get("/get_councils")
 def get_councils():
@@ -307,6 +327,7 @@ def get_bins(req: BinRequest):
     try:
         module_name = req.module.replace(" ", "")
         input_data = req.address_data.strip()
+        os_key = req.os_api_key
         
         # --- CACHE CHECK ---
         cache_key = f"{module_name}|{input_data.lower()}"
@@ -414,7 +435,13 @@ def get_bins(req: BinRequest):
                 # --- AUTO-LOOKUP ATTEMPT ---
                 found_uprn = None
                 if house_identifier:
-                    found_uprn = lookup_uprn_public(extracted_postcode, house_identifier)
+                    # Priority: Use OS API if key is available
+                    if os_key and len(os_key) > 5:
+                        logger.info("Using OS Places API for internal lookup")
+                        found_uprn = lookup_uprn_os(extracted_postcode, house_identifier, os_key)
+                    else:
+                        logger.info("Using Public Scraper for internal lookup")
+                        found_uprn = lookup_uprn_public(extracted_postcode, house_identifier)
                 
                 if found_uprn:
                      logger.info(f"SWITCHING TO UPRN MODE via Auto-Lookup: {found_uprn}")
