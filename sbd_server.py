@@ -39,7 +39,7 @@ class BinRequest(BaseModel):
 def home():
     return {
         "status": "OK", 
-        "message": "Bin API is running (v2.5 - Verbose Logging).", 
+        "message": "Bin API is running (v2.6 - Command Logging).", 
         "script_path": collect_data_path,
         "cwd": os.getcwd()
     }
@@ -142,6 +142,9 @@ def get_bins(req: BinRequest):
                     logger.info(f"Subprocess: Running {module_name} with raw Postcode '{input_data}'")
                     cmd.append(input_data)
         
+        # Log the full command for debugging
+        logger.info(f"Command: {cmd}")
+
         # Run the command and capture output
         result = subprocess.run(cmd, capture_output=True, text=True, env=env)
         
@@ -164,6 +167,10 @@ def get_bins(req: BinRequest):
         # PARSE JSON
         output = result.stdout.strip()
         
+        # UX: Intercept common scraper failure messages to give helpful advice
+        if "Invalid UPRN" in output:
+             raise HTTPException(status_code=400, detail="The Council's system could not find this postcode. Please find your 12-digit UPRN (Unique Property Reference Number) from 'uprn.uk' and enter that number instead.")
+
         try:
             return json.loads(output)
         except json.JSONDecodeError:
