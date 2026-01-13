@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from typing import Optional
 import uvicorn
 import importlib
 import json
@@ -40,11 +41,17 @@ class BinRequest(BaseModel):
     address_data: str
     module: str
 
+class AddressRequest(BaseModel):
+    postcode: str
+    module: str
+    os_api_key: Optional[str] = None
+
 # --- ADDRESS LOOKUP ENGINE ---
 def fetch_public_addresses(postcode):
     """
     Scrapes a public directory (uprn.uk) to return a list of 
     address-to-UPRN mappings for a given postcode.
+    Fallback method if no OS API Key is provided.
     """
     results = []
     try:
@@ -52,7 +59,7 @@ def fetch_public_addresses(postcode):
         url = f"https://www.uprn.uk/addresses/{clean_pc}"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
         
-        logger.info(f"ADDRESS LOOKUP: Fetching address list for {clean_pc}")
+        logger.info(f"PUBLIC LOOKUP: Fetching address list for {clean_pc}")
         response = requests.get(url, headers=headers, timeout=5)
         
         if response.status_code == 200:
@@ -74,12 +81,59 @@ def fetch_public_addresses(postcode):
                             "uprn": uprn,
                             "address": address_text
                         })
-            logger.info(f"ADDRESS LOOKUP: Found {len(results)} addresses.")
+            logger.info(f"PUBLIC LOOKUP: Found {len(results)} addresses.")
         else:
-            logger.warning(f"ADDRESS LOOKUP: Failed to fetch page. Status: {response.status_code}")
+            logger.warning(f"PUBLIC LOOKUP: Failed to fetch page. Status: {response.status_code}")
             
     except Exception as e:
-        logger.error(f"ADDRESS LOOKUP ERROR: {e}")
+        logger.error(f"PUBLIC LOOKUP ERROR: {e}")
+        
+    return results
+
+def fetch_os_places_addresses(postcode, api_key):
+    """
+    Queries the Ordnance Survey Places API for addresses.
+    Requires a valid API Key.
+    """
+    results = []
+    try:
+        # OS Places API Endpoint for Postcode search
+        url = "https://api.os.uk/search/places/v1/postcode"
+        params = {
+            "postcode": postcode,
+            "key": api_key,
+            "dataset": "DPA,LPI" # Query both AddressBase Premium and Local Property Identifier
+        }
+        
+        logger.info(f"OS API LOOKUP: Querying OS Places API for {postcode}")
+        response = requests.get(url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if "results" in data:
+                for item in data["results"]:
+                    # The API returns a wrapper object, usually 'DPA' or 'LPI'
+                    address_data = item.get("DPA") or item.get("LPI")
+                    if address_data:
+                        uprn = address_data.get("UPRN")
+                        address = address_data.get("ADDRESS")
+                        if uprn and address:
+                            results.append({
+                                "uprn": uprn,
+                                "address": address
+                            })
+                logger.info(f"OS API LOOKUP: Found {len(results)} addresses.")
+            else:
+                logger.info("OS API LOOKUP: No results found in response.")
+        elif response.status_code == 401:
+             logger.error("OS API LOOKUP: Invalid API Key.")
+             return [{"uprn": "error", "address": "Error: Invalid OS API Key provided."}]
+        else:
+            logger.warning(f"OS API LOOKUP: Request failed. Status: {response.status_code} - {response.text}")
+            
+    except Exception as e:
+        logger.error(f"OS API LOOKUP ERROR: {e}")
+        return [{"uprn": "error", "address": f"OS API Error: {str(e)}"}]
         
     return results
 
@@ -88,6 +142,8 @@ def lookup_uprn_public(postcode, house_identifier):
     Attempts to find a single UPRN by filtering the list from fetch_public_addresses
     against a house identifier (number or name).
     """
+    # Note: This function uses the public scraper implicitly for auto-matching 
+    # when no list selection has occurred yet.
     addresses = fetch_public_addresses(postcode)
     target = house_identifier.lower()
     
@@ -190,7 +246,7 @@ def get_standard_api_bins(base_url, uprn):
 
 @app.get("/")
 def home():
-    return {"status": "OK", "message": "Bin API is running (v3.6 - Wiltshire Specific Support)."}
+    return {"status": "OK", "message": "Bin API is running (v3.7 - OS Places API Support)."}
 
 @app.get("/get_councils")
 def get_councils():
@@ -219,18 +275,28 @@ def get_councils():
         errors.append(f"Error listing councils: {str(e)}")
     return {"error": "Could not list councils.", "details": errors}
 
-@app.get("/get_addresses")
-def get_addresses(postcode: str, module: str):
+@app.post("/get_addresses")
+def get_addresses(req: AddressRequest):
     """
     Returns a list of addresses and their UPRNs for a given postcode.
     Used to populate dropdowns in UI.
+    Supports OS Places API if key is provided, otherwise falls back to public scraper.
     """
-    addresses = fetch_public_addresses(postcode)
+    postcode = req.postcode
+    os_key = req.os_api_key
+    
+    if os_key and len(os_key) > 5:
+        # User provided an OS API Key - Use official source
+        addresses = fetch_os_places_addresses(postcode, os_key)
+    else:
+        # No Key - Use Public Scraper
+        addresses = fetch_public_addresses(postcode)
     
     if addresses:
+        # Sort officially or alphabetically for better UI
+        # OS API often returns mixed case, let's normalize if needed, but keeping raw is usually safer
         return addresses
     else:
-        # Fallback if no addresses found
         return [{"uprn": "error", "address": f"No addresses found for {postcode}. Please check format."}]
 
 @app.post("/get_bins")
@@ -331,8 +397,7 @@ def get_bins(req: BinRequest):
                 cmd.append("-p")
                 cmd.append(extracted_postcode)
             else:
-                # If Wiltshire, we MUST have postcode. Use dummy only if not Wiltshire? 
-                # Actually Wiltshire requires strict matching usually.
+                # If Wiltshire, we MUST have postcode.
                 if module_name.lower() == "wiltshirecouncil":
                      raise HTTPException(status_code=400, detail="Wiltshire Council requires both UPRN and Postcode.")
                 cmd.append("-p")
