@@ -34,7 +34,7 @@ class BinRequest(BaseModel):
 
 @app.get("/")
 def home():
-    return {"status": "OK", "message": "Bin API is running (v3.0 - Scope Fix)."}
+    return {"status": "OK", "message": "Bin API is running (v3.1 - Empty Bin Fix)."}
 
 @app.get("/get_councils")
 def get_councils():
@@ -78,6 +78,8 @@ def get_bins(req: BinRequest):
         env = os.environ.copy()
         env["PYTHONPATH"] = os.getcwd() + os.pathsep + env.get("PYTHONPATH", "")
         cmd = [sys.executable, collect_data_path, module_name]
+        
+        used_dummy_postcode = False # Track if we used a fallback postcode
 
         # --- INTELLIGENT PARSING LOGIC ---
         
@@ -122,6 +124,7 @@ def get_bins(req: BinRequest):
                     logger.info(f"Adding Dummy Postcode (Wiltshire HQ) for validation")
                     cmd.append("-p")
                     cmd.append("BA14 8JN")
+                    used_dummy_postcode = True
             
             else:
                 # 4. Standard Address/Postcode Search
@@ -171,8 +174,11 @@ def get_bins(req: BinRequest):
 
         # UX: Handle empty bins or specific errors in output
         if '"bins": []' in output:
+             # Check if we used a dummy postcode with a UPRN
+             if used_dummy_postcode:
+                 raise HTTPException(status_code=400, detail="This Council requires you to provide the Postcode alongside the UPRN to verify the address. Please search again entering both, e.g. '100120992798 SN8 1RA'.")
+             
              logger.warning("Scraper returned empty bins list.")
-             # We return it anyway so the frontend can say "No bins found"
         
         try:
             return json.loads(output)
