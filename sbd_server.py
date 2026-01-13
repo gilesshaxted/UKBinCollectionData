@@ -39,7 +39,7 @@ class BinRequest(BaseModel):
 def home():
     return {
         "status": "OK", 
-        "message": "Bin API is running (v2.6 - Command Logging).", 
+        "message": "Bin API is running (v2.7 - UPRN Fix).", 
         "script_path": collect_data_path,
         "cwd": os.getcwd()
     }
@@ -123,6 +123,11 @@ def get_bins(req: BinRequest):
                 logger.info(f"Subprocess: Running {module_name} with UPRN '{input_data}'")
                 cmd.append("-u")
                 cmd.append(input_data)
+                
+                # CRITICAL FIX: Some scrapers (like Wiltshire) crash if the postcode argument is missing,
+                # even when a UPRN is provided. We inject a generic valid postcode to satisfy the internal validator.
+                cmd.append("-p")
+                cmd.append("SW1A 1AA") 
             else:
                 # Assume Postcode - Apply UK Postcode Formatting logic
                 logger.info(f"DETECTED MODE: POSTCODE")
