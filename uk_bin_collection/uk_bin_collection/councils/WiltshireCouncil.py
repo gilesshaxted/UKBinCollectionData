@@ -42,12 +42,7 @@ class CouncilClass(AbstractGetBinDataClass):
         start_year = current_date.year
 
         for i in range(12):
-            # Calculate month and year for this iteration
-            # (month - 1) + i gives a 0-indexed offset.
-            # % 12 gives 0-11 range. + 1 converts back to 1-12.
             m = (start_month - 1 + i) % 12 + 1
-            # Calculate year increment. 
-            # If start_month + i > 12, we are in next year(s)
             y = start_year + ((start_month - 1 + i) // 12)
             months_to_fetch.append((m, y))
 
@@ -58,18 +53,13 @@ class CouncilClass(AbstractGetBinDataClass):
         check_uprn(user_uprn)
         user_uprn = str(user_uprn).zfill(12)
 
-        # Some data for the request
-        cookies = {
-            "ARRAffinity": "c5a9db7fe43cef907f06528c3d34a997365656f757206fbdf34193e2c3b6f737",
-            "ARRAffinitySameSite": "c5a9db7fe43cef907f06528c3d34a997365656f757206fbdf34193e2c3b6f737",
-        }
+        # Base headers
         headers = {
             "Accept": "*/*",
             "Accept-Language": "en-GB,en;q=0.9",
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            # 'Cookie': 'ARRAffinity=c5a9db7fe43cef907f06528c3d34a997365656f757206fbdf34193e2c3b6f737; ARRAffinitySameSite=c5a9db7fe43cef907f06528c3d34a997365656f757206fbdf34193e2c3b6f737',
             "Origin": "https://ilambassadorformsprod.azurewebsites.net",
             "Pragma": "no-cache",
             "Referer": "https://ilambassadorformsprod.azurewebsites.net/wastecollectiondays/index",
@@ -84,6 +74,15 @@ class CouncilClass(AbstractGetBinDataClass):
         }
 
         data_bins = {"bins": []}
+        
+        # Start a persistent session so we automatically capture and pass fresh cookies (like ARRAffinity)
+        session = requests.Session()
+        
+        # Initialise session to fetch dynamic Azure cookies
+        try:
+            session.get("https://ilambassadorformsprod.azurewebsites.net/wastecollectiondays/index", headers=headers, timeout=10)
+        except Exception as e:
+            raise SystemError(f"Failed to initialize session with Wiltshire Council server: {e}")
 
         # For each of the months we defined
         for cal_month, cal_year in months_to_fetch:
@@ -96,18 +95,15 @@ class CouncilClass(AbstractGetBinDataClass):
                 "Uprn": user_uprn,
             }
 
-            # Send it all as a POST
+            # Send it all as a POST using the established session
             try:
-                response = requests.post(
+                response = session.post(
                     "https://ilambassadorformsprod.azurewebsites.net/wastecollectiondays/wastecollectioncalendar",
-                    cookies=cookies,
                     headers=headers,
                     data=data,
-                    timeout=10 # Added timeout for safety
+                    timeout=15 
                 )
             except Exception as e:
-                 # If one month fails, log it but try to continue or re-raise
-                 # For now, we'll re-raise to signal failure
                  raise SystemError(f"Connection failed for {cal_month}/{cal_year}: {e}")
 
             # If we don't get a HTTP200, throw an error
@@ -117,7 +113,7 @@ class CouncilClass(AbstractGetBinDataClass):
                 )
 
             soup = BeautifulSoup(response.text, features="html.parser")
-            soup.prettify()
+            
             # Find all the bits of the current calendar that contain an event
             resultscontainer = soup.find_all("div", {"class": "cal-inner"})
 
@@ -139,15 +135,14 @@ class CouncilClass(AbstractGetBinDataClass):
                             continue
                             
                         collection_type = collection_type_element.text.strip()
-
                         collection_types = collection_type.split(" and ")
 
-                        for type in collection_types:
+                        for btype in collection_types:
                             dict_data = {
-                                "type": type,
+                                "type": btype,
                                 "collectionDate": collectiondate,
                             }
-                            # Check for duplicates before adding (just in case overlapping requests occur)
+                            # Check for duplicates before adding
                             if dict_data not in data_bins["bins"]:
                                 data_bins["bins"].append(dict_data)
                                 
