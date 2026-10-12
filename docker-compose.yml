@@ -1,0 +1,22 @@
+# Self-hosting (e.g. an Oracle VPS). Run:  docker compose up -d
+# Add the browser sidecar only if you want the ~100 councils that need a real browser:
+#   docker compose --profile browser up -d   and set SELENIUM_URL below.
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "10000:10000"
+    environment:
+      SBD_DATA_DIR: /data
+      # SBD_API_TOKEN: change-me          # optional shared secret (plugin field "Server token")
+      # SELENIUM_URL: http://selenium:4444
+    volumes:
+      - sbd-data:/data
+  selenium:
+    profiles: ["browser"]
+    image: selenium/standalone-chromium:latest   # use seleniarm/standalone-chromium on ARM hosts
+    restart: unless-stopped
+    shm_size: 1gb
+volumes:
+  sbd-data:
